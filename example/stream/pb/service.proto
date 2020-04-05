@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package pb;
+
+service Islands {
+    rpc AttachContainer (stream AttachStreamIn) returns (stream AttachStreamOut) {}
+    rpc ListContainer (ContainerInfo) returns (Result) {}
+}
+
+message AttachStreamIn {
+    string id = 1;
+    bytes content = 2;
+}
+
+message AttachStreamOut {
+    bytes content = 1;
+}
+
+message ContainerInfo {
+    string id = 1;
+    string name = 2;
+}
+
+message Result {
+    int32 Status = 1;
+}
