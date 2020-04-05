@@ -33,18 +33,18 @@ type UnaryClientInfo struct {
 type Unmarshaler func(interface{}) error
 
 // Invoker invokes the client's request and response from the ttrpc server
-type Invoker func(context.Context, *Request, *Response) error
+type Invoker func(context.Context, *Request, *Response, messageType, uint32) error
 
 // UnaryServerInterceptor specifies the interceptor function for server request/response
 type UnaryServerInterceptor func(context.Context, Unmarshaler, *UnaryServerInfo, Method) (interface{}, error)
 
 // UnaryClientInterceptor specifies the interceptor function for client request/response
-type UnaryClientInterceptor func(context.Context, *Request, *Response, *UnaryClientInfo, Invoker) error
+type UnaryClientInterceptor func(context.Context, *Request, *Response, *UnaryClientInfo, messageType, uint32, Invoker) error
 
 func defaultServerInterceptor(ctx context.Context, unmarshal Unmarshaler, info *UnaryServerInfo, method Method) (interface{}, error) {
 	return method(ctx, unmarshal)
 }
 
-func defaultClientInterceptor(ctx context.Context, req *Request, resp *Response, _ *UnaryClientInfo, invoker Invoker) error {
-	return invoker(ctx, req, resp)
+func defaultClientInterceptor(ctx context.Context, req *Request, resp *Response, _ *UnaryClientInfo, msgType messageType, streamID uint32, invoker Invoker) error {
+	return invoker(ctx, req, resp, msgType, streamID)
 }

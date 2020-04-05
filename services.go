@@ -19,6 +19,7 @@ package ttrpc
 import (
 	"context"
 	"io"
+	"net"
 	"os"
 	"path"
 	"unsafe"
@@ -29,11 +30,21 @@ import (
 	"google.golang.org/grpc/status"
 )
 
+type MethodSet struct {
+	UnaryMethod map[string]Method
+	StreamMethod map[string]StreamMethod
+}
+
+// Method is a method
 type Method func(ctx context.Context, unmarshal func(interface{}) error) (interface{}, error)
 
-type ServiceDesc struct {
-	Methods map[string]Method
+// StreamMethod is a method
+type StreamMethod func(ctx context.Context, conn net.Conn, stream *ServerStream) error
 
+// ServiceDesc is a desc
+type ServiceDesc struct {
+	Methods      map[string]Method
+	StreamMethod map[string]StreamMethod
 	// TODO(stevvooe): Add stream support.
 }
 
@@ -49,13 +60,14 @@ func newServiceSet(interceptor UnaryServerInterceptor) *serviceSet {
 	}
 }
 
-func (s *serviceSet) register(name string, methods map[string]Method) {
+func (s *serviceSet) register(name string, set MethodSet) {
 	if _, ok := s.services[name]; ok {
 		panic(errors.Errorf("duplicate service %v registered", name))
 	}
 
 	s.services[name] = ServiceDesc{
-		Methods: methods,
+		Methods: set.UnaryMethod,
+		StreamMethod:set.StreamMethod,
 	}
 }
 

@@ -18,7 +18,6 @@ package ttrpc
 
 import (
 	"fmt"
-
 	spb "google.golang.org/genproto/googleapis/rpc/status"
 )
 
@@ -61,3 +60,9 @@ type KeyValue struct {
 func (m *KeyValue) Reset()         { *m = KeyValue{} }
 func (*KeyValue) ProtoMessage()    {}
 func (m *KeyValue) String() string { return fmt.Sprintf("%+#v", m) }
+
+//type ServerStreamInfo struct {
+//	info map[uint32]*ServerStream
+//	lock sync.RWMutex
+//}
+

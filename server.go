@@ -32,8 +32,18 @@ import (
 )
 
 var (
-	ErrServerClosed = errors.New("ttrpc: server closed")
+	ErrServerClosed  = errors.New("ttrpc: server closed")
+	//serverStreamInfo ServerStreamInfo
+	serverStreamInfo sync.Map
 )
+
+func init() {
+	serverStreamInfo = sync.Map{}
+	//serverStreamInfo = ServerStreamInfo{
+	//	info: make(map[uint32]*ServerStream, 10),
+	//	lock: sync.RWMutex{},
+	//}
+}
 
 type Server struct {
 	config   *serverConfig
@@ -66,7 +76,7 @@ func NewServer(opts ...ServerOpt) (*Server, error) {
 	}, nil
 }
 
-func (s *Server) Register(name string, methods map[string]Method) {
+func (s *Server) Register(name string, methods MethodSet) {
 	s.services.register(name, methods)
 }
 
@@ -345,6 +355,7 @@ func (c *serverConn) run(sctx context.Context) {
 			}
 
 			mh, p, err := ch.recv()
+
 			if err != nil {
 				status, ok := status.FromError(err)
 				if !ok {
@@ -357,12 +368,61 @@ func (c *serverConn) run(sctx context.Context) {
 				if !sendImmediate(mh.StreamID, status) {
 					return
 				}
-
 				continue
 			}
 
-			if mh.Type != messageTypeRequest {
+			if mh.Type != MessageTypeRequest {
 				// we must ignore this for future compat.
+				if mh.Type != MessageTypeStream {
+					if !sendImmediate(mh.StreamID, status.Newf(codes.InvalidArgument, "Message type not supported!")) {
+						continue
+					}
+				}
+
+				var req Request
+				if err := c.server.codec.Unmarshal(p, &req); err != nil {
+					ch.putmbuf(p)
+					if !sendImmediate(mh.StreamID, status.Newf(codes.InvalidArgument, "unmarshal request error: %v", err)) {
+						return
+					}
+					continue
+				}
+
+				var srvStream *ServerStream
+
+				if stream, ok := serverStreamInfo.Load(mh.StreamID); !ok {
+
+					// if streamid not exist, new serverStream
+					srvStream = NewServerStream(c.conn, req.Service, req.Method)
+					serverStreamInfo.Store(mh.StreamID, srvStream)
+
+					go func() {
+						for {
+							select {
+							case <-ctx.Done():
+								return
+							default:
+								val := srvStream.recv()
+								ch.send(mh.StreamID, MessageTypeStream, val, FlagNone)
+							}
+						}
+					}()
+
+					desc := c.server.services.services[req.Service]
+					mthd := desc.StreamMethod[req.Method]
+
+					// callback
+					go func() {
+						mthd(ctx, c.conn, srvStream)
+						//	clean stream
+						ch.send(mh.StreamID, MessageTypeStream, []byte{}, FlagEnd)
+						serverStreamInfo.Delete(mh.StreamID)
+					}()
+				} else {
+					srvStream, ok = stream.(*ServerStream)
+				}
+
+				srvStream.send(req.Payload)
 				continue
 			}
 
@@ -374,6 +434,7 @@ func (c *serverConn) run(sctx context.Context) {
 				}
 				continue
 			}
+
 			ch.putmbuf(p)
 
 			if mh.StreamID%2 != 1 {
@@ -441,7 +502,7 @@ func (c *serverConn) run(sctx context.Context) {
 				return
 			}
 
-			if err := ch.send(response.id, messageTypeResponse, p); err != nil {
+			if err := ch.send(response.id, MessageTypeResponse, p, FlagNone); err != nil {
 				logrus.WithError(err).Error("failed sending message on channel")
 				return
 			}

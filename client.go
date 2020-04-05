@@ -23,6 +23,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -36,6 +37,10 @@ import (
 // ErrClosed is returned by client methods when the underlying connection is
 // closed.
 var ErrClosed = errors.New("ttrpc: closed")
+var streamID int32
+
+//var streamMap map[uint32]chan []byte
+var streamMap sync.Map
 
 // Client for a ttrpc server
 type Client struct {
@@ -58,6 +63,10 @@ type Client struct {
 // ClientOpts configures a client
 type ClientOpts func(c *Client)
 
+func init() {
+	streamID = 1
+}
+
 // WithOnClose sets the close func whenever the client's Close() method is called
 func WithOnClose(onClose func()) ClientOpts {
 	return func(c *Client) {
@@ -78,7 +87,7 @@ func NewClient(conn net.Conn, opts ...ClientOpts) *Client {
 		codec:         codec{},
 		conn:          conn,
 		channel:       newChannel(conn),
-		calls:         make(chan *callRequest),
+		calls:         make(chan *callRequest, 100),
 		closed:        cancel,
 		ctx:           ctx,
 		userCloseFunc: func() {},
@@ -94,13 +103,15 @@ func NewClient(conn net.Conn, opts ...ClientOpts) *Client {
 }
 
 type callRequest struct {
-	ctx  context.Context
-	req  *Request
-	resp *Response  // response will be written back here
-	errs chan error // error written here on completion
+	ctx      context.Context
+	streamID uint32
+	msgType  messageType
+	req      *Request
+	resp     *Response  // response will be written back here
+	errs     chan error // error written here on completion
 }
 
-func (c *Client) Call(ctx context.Context, service, method string, req, resp interface{}) error {
+func (c *Client) Call(ctx context.Context, service, method string, msgType messageType, req, resp interface{}) error {
 	payload, err := c.codec.Marshal(req)
 	if err != nil {
 		return err
@@ -127,7 +138,10 @@ func (c *Client) Call(ctx context.Context, service, method string, req, resp int
 	info := &UnaryClientInfo{
 		FullMethod: fullPath(service, method),
 	}
-	if err := c.interceptor(ctx, creq, cresp, info, c.dispatch); err != nil {
+
+	streamID := GetStreamID()
+
+	if err := c.interceptor(ctx, creq, cresp, info, MessageTypeRequest, streamID, c.dispatch); err != nil {
 		return err
 	}
 
@@ -141,14 +155,17 @@ func (c *Client) Call(ctx context.Context, service, method string, req, resp int
 	return nil
 }
 
-func (c *Client) dispatch(ctx context.Context, req *Request, resp *Response) error {
+func (c *Client) dispatch(ctx context.Context, req *Request, resp *Response, msgType messageType, streamID uint32) error {
 	errs := make(chan error, 1)
+
 	call := &callRequest{
-		ctx:  ctx,
-		req:  req,
-		resp: resp,
-		errs: errs,
-	}
+         ctx:  ctx,
+         req:  req,
+         resp: resp,
+		 msgType: msgType,
+		 streamID: streamID,
+         errs: errs,
+    }
 
 	select {
 	case <-ctx.Done():
@@ -166,6 +183,14 @@ func (c *Client) dispatch(ctx context.Context, req *Request, resp *Response) err
 	case <-c.ctx.Done():
 		return c.error()
 	}
+}
+
+func (c *Client) GetCalls() chan *callRequest {
+	return c.calls
+}
+
+func (c *Client) GetConn() net.Conn {
+	return c.conn
 }
 
 func (c *Client) Close() error {
@@ -197,6 +222,7 @@ func (r *receiver) run(ctx context.Context, c *channel) {
 			return
 		default:
 			mh, p, err := c.recv()
+
 			if err != nil {
 				_, ok := status.FromError(err)
 				if !ok {
@@ -220,9 +246,13 @@ func (r *receiver) run(ctx context.Context, c *channel) {
 	}
 }
 
+func GetStreamID() uint32 {
+	id := atomic.AddInt32(&streamID, 2)
+	return uint32(id)
+}
+
 func (c *Client) run() {
 	var (
-		streamID      uint32 = 1
 		waiters              = make(map[uint32]*callRequest)
 		calls                = c.calls
 		incoming             = make(chan *message)
@@ -256,13 +286,14 @@ func (c *Client) run() {
 	for {
 		select {
 		case call := <-calls:
-			if err := c.send(streamID, messageTypeRequest, call.req); err != nil {
+			if err := c.send(call.streamID, call.msgType, call.req); err != nil {
 				call.errs <- err
 				continue
 			}
 
-			waiters[streamID] = call
-			streamID += 2 // enforce odd client initiated request ids
+			waiters[call.streamID] = call
+
+			//streamID += 2 // enforce odd client initiated request ids
 		case msg := <-incoming:
 			call, ok := waiters[msg.StreamID]
 			if !ok {
@@ -270,8 +301,12 @@ func (c *Client) run() {
 				continue
 			}
 
-			call.errs <- c.recv(call.resp, msg)
-			delete(waiters, msg.StreamID)
+			if msg.Type != MessageTypeStream {
+				call.errs <- c.recv(call.resp, msg)
+				delete(waiters, msg.StreamID)
+			} else {
+				c.recv(call.resp, msg)
+			}
 		case <-receiversDone:
 			// all the receivers have exited
 			if recv.err != nil {
@@ -307,7 +342,7 @@ func (c *Client) send(streamID uint32, mtype messageType, msg interface{}) error
 		return err
 	}
 
-	return c.channel.send(streamID, mtype, p)
+	return c.channel.send(streamID, mtype, p, FlagNone)
 }
 
 func (c *Client) recv(resp *Response, msg *message) error {
@@ -315,8 +350,27 @@ func (c *Client) recv(resp *Response, msg *message) error {
 		return msg.err
 	}
 
-	if msg.Type != messageTypeResponse {
-		return errors.New("unknown message type received")
+	if msg.Type != MessageTypeResponse {
+		//return errors.New("unknown message type received")
+
+		if val, ok := streamMap.Load(msg.StreamID); !ok {
+			return errors.New("unknown stream ID")
+		} else {
+			if msg.Flags != FlagEnd && len(msg.p) == 0 {
+				return errors.New("empty payload without end flag")
+			}
+
+			if msg.Flags == FlagEnd {
+				streamMap.Delete(msg.StreamID)
+				close(val.(chan []byte))
+				return nil
+			}
+
+			select {
+			case val.(chan []byte) <- msg.p:
+				return nil
+			}
+		}
 	}
 
 	defer c.channel.putmbuf(msg.p)

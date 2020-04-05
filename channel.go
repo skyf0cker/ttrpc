@@ -36,8 +36,16 @@ const (
 type messageType uint8
 
 const (
-	messageTypeRequest  messageType = 0x1
-	messageTypeResponse messageType = 0x2
+	MessageTypeRequest  messageType = 0x1
+	MessageTypeResponse messageType = 0x2
+	MessageTypeStream   messageType = 0x3
+)
+
+type FlagType uint8
+
+const (
+	FlagNone FlagType = 0x00
+	FlagEnd FlagType = 0x01
 )
 
 // messageHeader represents the fixed-length message header of 10 bytes sent
@@ -46,7 +54,7 @@ type messageHeader struct {
 	Length   uint32      // length excluding this header. b[:4]
 	StreamID uint32      // identifies which request stream message is a part of. b[4:8]
 	Type     messageType // message type b[8]
-	Flags    uint8       // reserved          b[9]
+	Flags    FlagType       // reserved          b[9]
 }
 
 func readMessageHeader(p []byte, r io.Reader) (messageHeader, error) {
@@ -59,7 +67,7 @@ func readMessageHeader(p []byte, r io.Reader) (messageHeader, error) {
 		Length:   binary.BigEndian.Uint32(p[:4]),
 		StreamID: binary.BigEndian.Uint32(p[4:8]),
 		Type:     messageType(p[8]),
-		Flags:    p[9],
+		Flags:    FlagType(p[9]),
 	}, nil
 }
 
@@ -67,7 +75,7 @@ func writeMessageHeader(w io.Writer, p []byte, mh messageHeader) error {
 	binary.BigEndian.PutUint32(p[:4], mh.Length)
 	binary.BigEndian.PutUint32(p[4:8], mh.StreamID)
 	p[8] = byte(mh.Type)
-	p[9] = mh.Flags
+	p[9] = byte(mh.Flags)
 
 	_, err := w.Write(p[:])
 	return err
@@ -119,8 +127,8 @@ func (ch *channel) recv() (messageHeader, []byte, error) {
 	return mh, p, nil
 }
 
-func (ch *channel) send(streamID uint32, t messageType, p []byte) error {
-	if err := writeMessageHeader(ch.bw, ch.hwbuf[:], messageHeader{Length: uint32(len(p)), StreamID: streamID, Type: t}); err != nil {
+func (ch *channel) send(streamID uint32, t messageType, p []byte, flag FlagType) error {
+	if err := writeMessageHeader(ch.bw, ch.hwbuf[:], messageHeader{Length: uint32(len(p)), StreamID: streamID, Type: t, Flags:flag}); err != nil {
 		return err
 	}
 
