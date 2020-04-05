@@ -9,6 +9,7 @@ require (
 	github.com/prometheus/procfs v0.0.0-20190522114515-bc1a522cf7b1
 	github.com/sirupsen/logrus v1.4.2
 	golang.org/x/sys v0.0.0-20200120151820-655fe14d7479
+	golang.org/x/tools v0.0.0-20190524140312-2c0ae7006135
 	google.golang.org/genproto v0.0.0-20200117163144-32f20d992d24
 	google.golang.org/grpc v1.26.0
 )
